@@ -95,17 +95,18 @@ export default function HomeScreen({ session }) {
           if (!name) return;
           const code = Math.random().toString(36).substring(2, 8).toUpperCase();
           
-          // 1. 建立群組
-          const { data: g, error } = await supabase.from('groups').insert([{ name, invite_code: code, creator_id: session.user.id }]).select().single();
-          if (error) return alert("失敗: " + error.message);
-          
-          // 2.把自己加入 (現在使用簡單的 RLS 規則，不會報錯了)
-          const { error: memberError } = await supabase.from('group_members').insert([{ group_id: g.id, user_id: session.user.id, role: 'admin' }]);
-          
-          if (memberError) alert("加入成員失敗: " + memberError.message);
-          else {
+          // ★ 修改重點：改用 rpc 呼叫，一次完成建群+加人，絕對不會錯
+          const { data: newGroupId, error } = await supabase.rpc('create_group_with_admin', { 
+            group_name: name, 
+            invite_code: code 
+          });
+
+          if (error) {
+            alert("失敗: " + error.message);
+          } else {
             alert("建立成功！邀請碼: " + code);
-            fetchData(); fetchGroups();
+            fetchData(); 
+            fetchGroups();
           }
       } else {
           Alert.alert("提示", "目前手機版建立群組功能開發中");
