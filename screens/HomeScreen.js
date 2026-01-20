@@ -95,18 +95,34 @@ export default function HomeScreen({ session }) {
           if (!name) return;
           const code = Math.random().toString(36).substring(2, 8).toUpperCase();
           
-          // ★ 修改重點：改用 rpc 呼叫，一次完成建群+加人，絕對不會錯
-          const { data: newGroupId, error } = await supabase.rpc('create_group_with_admin', { 
-            group_name: name, 
-            invite_code: code 
-          });
+          // 1. 先建立群組
+          const { data: groupData, error: groupError } = await supabase
+            .from('groups')
+            .insert([{ 
+                name, 
+                invite_code: code, 
+                creator_id: session.user.id 
+            }])
+            .select()
+            .single();
 
-          if (error) {
-            alert("失敗: " + error.message);
+          if (groupError) return alert("建立群組失敗: " + groupError.message);
+          
+          // 2. 再把自己加入成員 (因為我是 creator，剛剛的 SQL 規則允許我執行這步)
+          const { error: memberError } = await supabase
+            .from('group_members')
+            .insert([{ 
+                group_id: groupData.id, 
+                user_id: session.user.id, 
+                role: 'admin' 
+            }]);
+          
+          if (memberError) {
+             alert("加入成員失敗: " + memberError.message);
           } else {
-            alert("建立成功！邀請碼: " + code);
-            fetchData(); 
-            fetchGroups();
+             alert("建立成功！邀請碼: " + code);
+             fetchData(); 
+             fetchGroups();
           }
       } else {
           Alert.alert("提示", "目前手機版建立群組功能開發中");
