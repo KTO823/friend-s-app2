@@ -95,7 +95,7 @@ export default function HomeScreen({ session }) {
           if (!name) return;
           const code = Math.random().toString(36).substring(2, 8).toUpperCase();
           
-          // 1. 先建立群組
+          // 步驟 1: 建立群組 (現在沒有 RLS，這絕對會成功)
           const { data: groupData, error: groupError } = await supabase
             .from('groups')
             .insert([{ 
@@ -106,9 +106,12 @@ export default function HomeScreen({ session }) {
             .select()
             .single();
 
-          if (groupError) return alert("建立群組失敗: " + groupError.message);
+          if (groupError) {
+            console.error(groupError); // 方便除錯
+            return alert("建立群組失敗: " + groupError.message);
+          }
           
-          // 2. 再把自己加入成員 (因為我是 creator，剛剛的 SQL 規則允許我執行這步)
+          // 步驟 2: 把自己加入成員 (現在沒有 RLS，這也絕對會成功)
           const { error: memberError } = await supabase
             .from('group_members')
             .insert([{ 
@@ -118,6 +121,7 @@ export default function HomeScreen({ session }) {
             }]);
           
           if (memberError) {
+             console.error(memberError);
              alert("加入成員失敗: " + memberError.message);
           } else {
              alert("建立成功！邀請碼: " + code);
