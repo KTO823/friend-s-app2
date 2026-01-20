@@ -5,7 +5,6 @@ import LoginScreen from '../screens/LoginScreen';
 import SignUpScreen from '../screens/SignUpScreen';
 import ForgotPasswordScreen from '../screens/ForgotPasswordScreen';
 import ProfileScreen from '../screens/ProfileScreen';
-// ... 其他您原本有的頁面 (如 GroupDetail 等)
 
 const Stack = createNativeStackNavigator();
 
@@ -15,9 +14,14 @@ export default function AppNavigator({ session }) {
       {session ? (
         // === 已登入 (主程式) ===
         <>
-          <Stack.Screen name="Home" component={HomeScreen} />
-          <Stack.Screen name="Profile" component={ProfileScreen} />
-          {/* 這裡記得補上您其他的頁面，如 GroupDetail */}
+          {/* 修正重點：必須用 children 的方式把 session 傳進去，否則 HomeScreen 會壞掉 */}
+          <Stack.Screen name="Home">
+            {(props) => <HomeScreen {...props} session={session} />}
+          </Stack.Screen>
+          
+          <Stack.Screen name="Profile">
+             {(props) => <ProfileScreen {...props} session={session} />}
+          </Stack.Screen>
         </>
       ) : (
         // === 未登入 (Auth Flow) ===

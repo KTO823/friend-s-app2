@@ -35,8 +35,24 @@ export default function HomeScreen({ session }) {
   }, [activeTab]);
 
   async function fetchProfile() {
-    const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
-    setProfile(data);
+    try {
+      const { data, error } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
+      
+      // 如果找不到資料 (PGRST116)，代表是新用戶，自動建立一個
+      if (error && error.code === 'PGRST116') {
+        const newProfile = { 
+          id: session.user.id, 
+          username: session.user.email.split('@')[0], 
+          avatar_url: null 
+        };
+        await supabase.from('profiles').insert([newProfile]);
+        setProfile(newProfile);
+      } else if (data) {
+        setProfile(data);
+      }
+    } catch (e) {
+      console.log('Profile Load Error:', e);
+    }
   }
 
   async function fetchStats() {
