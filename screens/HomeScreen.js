@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Modal, TextInput, Alert, SafeAreaView, Platform, Image } from 'react-native';
-import { LayoutGrid, Gift, CreditCard, User, Plus, X, ArrowDownLeft, ArrowUpRight, Smile } from 'lucide-react-native';
+import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Modal, TextInput, Alert, SafeAreaView, Image, Clipboard } from 'react-native';
+import { LayoutGrid, Gift, CreditCard, User, Plus, X, ArrowDownLeft, ArrowUpRight, Copy, UserPlus } from 'lucide-react-native';
 import { supabase } from '../lib/supabase';
 
 const COLORS = { primary: '#4F46E5', bg: '#F8FAFC', text: '#334155', gray: '#94A3B8' };
@@ -9,41 +9,101 @@ export default function HomeScreen({ session }) {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [modalVisible, setModalVisible] = useState(false);
   const [addType, setAddType] = useState('wishlist');
+  const [addFriendModal, setAddFriendModal] = useState(false); // 新增好友視窗
+  const [friendCode, setFriendCode] = useState(''); // 輸入好友代碼
   
   const [profile, setProfile] = useState(null);
   const [dataList, setDataList] = useState([]);
-  const [groups, setGroups] = useState([]);
-  const [members, setMembers] = useState([]);
+  const [friends, setFriends] = useState([]); // 我的好友列表
   
   const [wishCount, setWishCount] = useState(0);
   const [receivable, setReceivable] = useState(0);
 
   const [formName, setFormName] = useState('');
   const [formAmount, setFormAmount] = useState('');
-  const [selectedGroup, setSelectedGroup] = useState(null);
-  const [selectedMember, setSelectedMember] = useState(null);
+  const [selectedDebtor, setSelectedDebtor] = useState(null);
 
   useEffect(() => {
     if (session) {
       fetchProfile();
       fetchData();
-      fetchGroups();
       fetchStats();
+      fetchFriends();
     }
   }, [activeTab, session]);
 
-  // 1. Profile 防呆機制
+  // 1. 取得自己資料 (含邀請碼)
   async function fetchProfile() {
     try {
       const { data, error } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
+      
+      // 如果沒有邀請碼，幫他產生一個並存入
+      if (data && !data.invite_code) {
+         const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+         await supabase.from('profiles').update({ invite_code: code }).eq('id', session.user.id);
+         data.invite_code = code;
+      }
+
       if (error && error.code === 'PGRST116') {
-        const newProfile = { id: session.user.id, username: session.user.email.split('@')[0], avatar_url: null };
+        // 新用戶初始化
+        const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+        const newProfile = { id: session.user.id, username: session.user.email.split('@')[0], avatar_url: null, invite_code: code };
         await supabase.from('profiles').insert([newProfile]);
         setProfile(newProfile);
       } else if (data) {
         setProfile(data);
       }
     } catch (e) { console.log('Profile Error:', e); }
+  }
+
+  // 2. 取得好友列表 (雙向查詢：我加人 OR 人加我)
+  async function fetchFriends() {
+    // 找出所有跟我在 friendships 表有關聯的人
+    const { data: relations } = await supabase
+      .from('friendships')
+      .select('user_id, friend_id')
+      .or(`user_id.eq.${session.user.id},friend_id.eq.${session.user.id}`);
+    
+    if (!relations) return;
+
+    // 整理出「對方的 ID」
+    const friendIds = relations.map(r => r.user_id === session.user.id ? r.friend_id : r.user_id);
+    
+    if (friendIds.length > 0) {
+        // 抓取對方的詳細資料
+        const { data: friendsData } = await supabase.from('profiles').select('*').in('id', friendIds);
+        setFriends(friendsData || []);
+    } else {
+        setFriends([]);
+    }
+  }
+
+  // 3. 加好友功能
+  async function handleAddFriend() {
+      if (!friendCode) return Alert.alert("請輸入代碼");
+      
+      // A. 先找這個代碼是誰
+      const { data: targetUser, error } = await supabase.from('profiles').select('id, username').eq('invite_code', friendCode).single();
+      
+      if (!targetUser) return Alert.alert("找不到此代碼", "請確認好友的邀請碼是否正確");
+      if (targetUser.id === session.user.id) return Alert.alert("不能加自己 XD");
+
+      // B. 建立好友關係
+      // 這裡直接 insert，如果已經是好友(因為有 unique 限制)會報錯，我們就當作成功
+      const { error: addError } = await supabase.from('friendships').insert([{
+          user_id: session.user.id,
+          friend_id: targetUser.id
+      }]);
+
+      if (addError) {
+          if (addError.code === '23505') Alert.alert("已經是好友囉！");
+          else Alert.alert("加入失敗", addError.message);
+      } else {
+          Alert.alert("成功", `已將 ${targetUser.username} 加為好友！`);
+          setAddFriendModal(false);
+          setFriendCode('');
+          fetchFriends(); // 重新整理列表
+      }
   }
 
   async function fetchStats() {
@@ -54,114 +114,35 @@ export default function HomeScreen({ session }) {
   }
 
   async function fetchData() {
+    if (activeTab === 'dashboard') return;
+
     if (activeTab === 'gifts') {
       const { data } = await supabase.from('gifts').select('*, profiles:creator_id(username)').order('created_at', { ascending: false });
       setDataList(data || []);
     } else if (activeTab === 'ledgers') {
       const { data } = await supabase.from('ledgers').select('*, creditor:profiles!creditor_id(username), debtor:profiles!debtor_id(username)').order('created_at', { ascending: false });
       setDataList(data || []);
-    } else if (activeTab === 'settings') {
-      const { data } = await supabase.from('group_members').select('*, groups(*)').eq('user_id', session.user.id);
-      setDataList(data || []);
     }
-  }
-
-  async function fetchGroups() {
-    const { data } = await supabase.from('group_members').select('group_id, groups(id, name)').eq('user_id', session.user.id);
-    setGroups(data?.map(i => i.groups) || []);
-  }
-
-  // ★ 關鍵修改：使用 RPC 抓取成員，避開 RLS 無限迴圈
-  async function fetchMembers(gid) {
-    try {
-      // 呼叫我們剛剛在 SQL 建立的 "VIP 通道" 函數
-      const { data, error } = await supabase.rpc('get_group_members', { lookup_group_id: gid });
-      
-      if (error) {
-        console.log('Fetch Members Error:', error);
-        return;
-      }
-      // 過濾掉自己
-      setMembers(data?.filter(m => m.user_id !== session.user.id) || []);
-    } catch (e) {
-      console.log('RPC Error:', e);
-    }
-  }
-
-  // 建立群組
-  async function handleCreateGroup() {
-      if (Platform.OS === 'web') {
-          const name = prompt("請輸入群組名稱");
-          if (!name) return;
-          const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-          
-          // 步驟 1: 建立群組 (現在沒有 RLS，這絕對會成功)
-          const { data: groupData, error: groupError } = await supabase
-            .from('groups')
-            .insert([{ 
-                name, 
-                invite_code: code, 
-                creator_id: session.user.id 
-            }])
-            .select()
-            .single();
-
-          if (groupError) {
-            console.error(groupError); // 方便除錯
-            return alert("建立群組失敗: " + groupError.message);
-          }
-          
-          // 步驟 2: 把自己加入成員 (現在沒有 RLS，這也絕對會成功)
-          const { error: memberError } = await supabase
-            .from('group_members')
-            .insert([{ 
-                group_id: groupData.id, 
-                user_id: session.user.id, 
-                role: 'admin' 
-            }]);
-          
-          if (memberError) {
-             console.error(memberError);
-             alert("加入成員失敗: " + memberError.message);
-          } else {
-             alert("建立成功！邀請碼: " + code);
-             fetchData(); 
-             fetchGroups();
-          }
-      } else {
-          Alert.alert("提示", "目前手機版建立群組功能開發中");
-      }
-  }
-  
-  // 加入群組
-  async function handleJoinGroup() {
-      if (Platform.OS === 'web') {
-          const code = prompt("請輸入邀請碼");
-          if (!code) return;
-          const { data: g } = await supabase.from('groups').select('id, name').eq('invite_code', code).single();
-          if(!g) return alert("邀請碼無效");
-          
-          // 加入 (使用簡單 RLS)
-          const { error } = await supabase.from('group_members').insert([{ group_id: g.id, user_id: session.user.id }]);
-          if(error) alert("加入失敗或已在群組"); else { alert("加入成功"); fetchData(); fetchGroups(); }
-      } else {
-          Alert.alert("提示", "目前手機版加入群組功能開發中");
-      }
   }
 
   async function handleSubmit() {
-    if (!formName || !selectedGroup) return Alert.alert('提示', '請填寫完整');
+    if (!formName) return Alert.alert('提示', '請輸入名稱');
     
     let error;
     if (addType === 'wishlist') {
       const { error: err } = await supabase.from('gifts').insert([{
-        item_name: formName, amount: parseInt(formAmount)||0, group_id: selectedGroup, creator_id: session.user.id
+        item_name: formName, 
+        amount: parseInt(formAmount)||0, 
+        creator_id: session.user.id
       }]);
       error = err;
     } else {
-      if (!selectedMember) return Alert.alert('提示', '請選擇欠款人');
+      if (!selectedDebtor) return Alert.alert('提示', '請選擇欠款人');
       const { error: err } = await supabase.from('ledgers').insert([{
-        description: formName, amount: parseInt(formAmount)||0, group_id: selectedGroup, creditor_id: session.user.id, debtor_id: selectedMember
+        description: formName, 
+        amount: parseInt(formAmount)||0, 
+        creditor_id: session.user.id, 
+        debtor_id: selectedDebtor
       }]);
       error = err;
     }
@@ -169,12 +150,11 @@ export default function HomeScreen({ session }) {
     if (error) Alert.alert('失敗', error.message);
     else {
       setModalVisible(false);
-      setFormName(''); setFormAmount(''); setSelectedGroup(null);
+      setFormName(''); setFormAmount(''); setSelectedDebtor(null);
       fetchData(); fetchStats();
     }
   }
 
-  // 空白狀態
   const EmptyState = ({ message, icon: Icon }) => (
     <View style={{ alignItems: 'center', marginTop: 80, opacity: 0.6 }}>
       <Icon size={60} color={COLORS.gray} />
@@ -189,41 +169,54 @@ export default function HomeScreen({ session }) {
           <View style={styles.welcomeCard}>
             <Text style={styles.welcomeLabel}>WELCOME BACK</Text>
             <Text style={styles.welcomeTitle}>{profile?.username || 'User'}</Text>
-            <Text style={styles.welcomeSub}>{session.user.email}</Text>
+            
+            {/* 顯示我的邀請碼 */}
+            <TouchableOpacity onPress={()=>{Clipboard.setString(profile?.invite_code); Alert.alert("已複製", "邀請碼已複製到剪貼簿")}} style={{flexDirection:'row', alignItems:'center', marginTop: 4, marginBottom: 20}}>
+                <Text style={styles.welcomeSub}>ID: {profile?.invite_code || '...'}</Text>
+                <Copy size={14} color="rgba(255,255,255,0.8)" style={{marginLeft: 6}}/>
+            </TouchableOpacity>
+
             <View style={styles.statRow}>
                <View style={styles.statBox}><Text style={styles.statLabel}>許願中</Text><Text style={styles.statValue}>{wishCount}</Text></View>
                <View style={styles.statBox}><Text style={styles.statLabel}>待收款</Text><Text style={[styles.statValue, {color: '#6EE7B7'}]}>${receivable}</Text></View>
             </View>
           </View>
           
-          <View style={{marginTop: 30}}>
-            <Text style={styles.sectionTitle}>我的群組</Text>
-            {groups.length === 0 ? (
-              <View style={{backgroundColor: 'white', padding: 20, borderRadius: 20, alignItems: 'center', marginTop: 10}}>
-                <Smile size={40} color={COLORS.primary} style={{marginBottom: 10}}/>
-                <Text style={{color: COLORS.text, fontWeight: 'bold'}}>快拉朋友進來吧！</Text>
-                <Text style={{color: COLORS.gray, fontSize: 12, marginTop: 4}}>目前還沒有任何群組喔</Text>
-              </View>
-            ) : (
-              groups.map(g => (
-                <View key={g.id} style={styles.groupCard}>
-                  <Text style={styles.groupName}>{g.name}</Text>
-                </View>
-              ))
-            )}
+          <View style={{marginTop: 30, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}}>
+            <Text style={styles.sectionTitle}>我的好友 ({friends.length})</Text>
+            <TouchableOpacity onPress={() => setAddFriendModal(true)} style={{flexDirection: 'row', alignItems: 'center', backgroundColor: '#E0E7FF', padding: 8, borderRadius: 12}}>
+                <UserPlus size={16} color={COLORS.primary} style={{marginRight: 4}}/>
+                <Text style={{color: COLORS.primary, fontWeight: 'bold', fontSize: 12}}>加好友</Text>
+            </TouchableOpacity>
           </View>
+
+          {friends.length === 0 ? (
+              <View style={{padding: 20, alignItems: 'center', marginTop: 20, backgroundColor: 'white', borderRadius: 16}}>
+                <Text style={{color: COLORS.gray, marginBottom: 10}}>還沒有好友喔</Text>
+                <Text style={{color: COLORS.text, fontWeight: 'bold'}}>快把你的 ID 給朋友：{profile?.invite_code}</Text>
+              </View>
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginTop: 10}}>
+                {friends.map(u => (
+                    <View key={u.id} style={{alignItems: 'center', marginRight: 16, width: 70}}>
+                        <View style={{width: 60, height: 60, borderRadius: 30, backgroundColor: '#E2E8F0', overflow: 'hidden', marginBottom: 8}}>
+                             <Image source={{uri: `https://api.dicebear.com/9.x/avataaars/png?seed=${u.username}`}} style={{width: '100%', height: '100%'}} />
+                        </View>
+                        <Text numberOfLines={1} style={{fontSize: 12, color: COLORS.text, fontWeight: 'bold'}}>{u.username}</Text>
+                    </View>
+                ))}
+            </ScrollView>
+          )}
         </View>
       );
     } 
     
+    // Gifts & Ledgers 的部分保持不變...
     if (activeTab === 'gifts') {
       return (
         <ScrollView contentContainerStyle={{paddingBottom: 100}}>
           <Text style={styles.pageTitle}>許願池</Text>
-          {dataList.length === 0 ? (
-            <EmptyState message="還沒有人許願喔！" icon={Gift} />
-          ) : (
-            dataList.map(item => (
+          {dataList.length === 0 ? <EmptyState message="還沒有人許願喔！" icon={Gift} /> : dataList.map(item => (
               <View key={item.id} style={styles.listItem}>
                 <View style={[styles.iconBox, {backgroundColor: item.is_reserved ? '#F1F5F9' : '#EEF2FF'}]}>
                   <Gift size={24} color={item.is_reserved ? '#94A3B8' : '#4F46E5'} />
@@ -237,7 +230,7 @@ export default function HomeScreen({ session }) {
                 </TouchableOpacity>
               </View>
             ))
-          )}
+          }
         </ScrollView>
       );
     }
@@ -246,10 +239,7 @@ export default function HomeScreen({ session }) {
       return (
         <ScrollView contentContainerStyle={{paddingBottom: 100}}>
           <Text style={styles.pageTitle}>帳務紀錄</Text>
-          {dataList.length === 0 ? (
-            <EmptyState message="太棒了！沒有欠款" icon={CreditCard} />
-          ) : (
-            dataList.map(item => {
+          {dataList.length === 0 ? <EmptyState message="太棒了！沒有欠款" icon={CreditCard} /> : dataList.map(item => {
               const isMeCred = item.creditor_id === session.user.id;
               return (
                 <View key={item.id} style={styles.listItem}>
@@ -267,44 +257,7 @@ export default function HomeScreen({ session }) {
                 </View>
               )
             })
-          )}
-        </ScrollView>
-      );
-    }
-    
-    if (activeTab === 'settings') {
-      return (
-        <ScrollView contentContainerStyle={{paddingBottom: 100}}>
-          <View style={{alignItems: 'center', marginBottom: 30}}>
-            <View style={{width: 80, height: 80, borderRadius: 40, backgroundColor: '#E2E8F0', marginBottom: 10, overflow: 'hidden'}}>
-               <Image source={{uri: `https://api.dicebear.com/9.x/avataaars/png?seed=${profile?.username}`}} style={{width: '100%', height: '100%'}} />
-            </View>
-            <Text style={styles.pageTitle}>{profile?.username}</Text>
-            <TouchableOpacity onPress={() => supabase.auth.signOut()} style={{marginTop: 10, padding: 8, backgroundColor: '#F1F5F9', borderRadius: 20}}>
-               <Text style={{fontSize: 12, fontWeight: 'bold', color: '#94A3B8'}}>登出帳號</Text>
-            </TouchableOpacity>
-          </View>
-          
-          <View style={styles.sectionBox}>
-              <Text style={{fontSize: 12, color: '#94A3B8', fontWeight: 'bold', marginBottom: 10}}>MY GROUPS</Text>
-              {groups.length === 0 ? (
-                  <View style={{padding: 20, alignItems: 'center'}}>
-                    <Text style={{color: COLORS.gray}}>尚無群組</Text>
-                  </View>
-              ) : (
-                dataList.map(item => (
-                    <View key={item.id} style={{flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderColor: '#F1F5F9'}}>
-                        <Text style={{fontWeight: 'bold', color: '#334155'}}>{item.groups.name}</Text>
-                        <Text style={{fontSize: 12, color: '#94A3B8'}}>Code: {item.groups.invite_code}</Text>
-                    </View>
-                ))
-              )}
-              
-              <View style={{flexDirection: 'row', gap: 10, marginTop: 20}}>
-                  <TouchableOpacity onPress={handleCreateGroup} style={[styles.btnPrimary, {marginTop: 0, flex: 1, backgroundColor: '#1E293B'}]}><Text style={{color: 'white', fontWeight: 'bold'}}>建群組</Text></TouchableOpacity>
-                  <TouchableOpacity onPress={handleJoinGroup} style={[styles.btnPrimary, {marginTop: 0, flex: 1, backgroundColor: 'white', borderWidth: 1, borderColor: '#E2E8F0'}]}><Text style={{color: '#64748B', fontWeight: 'bold'}}>加群組</Text></TouchableOpacity>
-              </View>
-          </View>
+          }
         </ScrollView>
       );
     }
@@ -317,17 +270,18 @@ export default function HomeScreen({ session }) {
       </View>
 
       <View style={styles.navBar}>
-        <NavBtn icon={LayoutGrid} label="總覽" active={activeTab==='dashboard'} onPress={()=>setActiveTab('dashboard')}/>
-        <NavBtn icon={Gift} label="禮物" active={activeTab==='gifts'} onPress={()=>setActiveTab('gifts')}/>
+        <NavBtn icon={LayoutGrid} label="首頁" active={activeTab==='dashboard'} onPress={()=>setActiveTab('dashboard')}/>
+        <NavBtn icon={Gift} label="許願" active={activeTab==='gifts'} onPress={()=>setActiveTab('gifts')}/>
         
         <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
           <Plus color="white" size={32} />
         </TouchableOpacity>
 
-        <NavBtn icon={CreditCard} label="帳務" active={activeTab==='ledgers'} onPress={()=>setActiveTab('ledgers')}/>
-        <NavBtn icon={User} label="我的" active={activeTab==='settings'} onPress={()=>setActiveTab('settings')}/>
+        <NavBtn icon={CreditCard} label="記帳" active={activeTab==='ledgers'} onPress={()=>setActiveTab('ledgers')}/>
+        <NavBtn icon={User} label="我的" active={false} onPress={()=>{/*跳轉*/}}/>
       </View>
 
+      {/* 新增項目 Modal */}
       <Modal visible={modalVisible} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -344,25 +298,17 @@ export default function HomeScreen({ session }) {
             <TextInput style={styles.input} placeholder="名稱" value={formName} onChangeText={setFormName} />
             <TextInput style={styles.input} placeholder="金額" keyboardType="numeric" value={formAmount} onChangeText={setFormAmount} />
 
-            <Text style={{marginBottom: 5, fontSize: 12, color: '#94A3B8', fontWeight: 'bold'}}>選擇群組</Text>
-            <ScrollView horizontal style={{marginBottom: 15}} showsHorizontalScrollIndicator={false}>
-              {groups.map(g => (
-                <TouchableOpacity key={g.id} onPress={()=>{setSelectedGroup(g.id); fetchMembers(g.id);}} style={[styles.chip, selectedGroup===g.id && styles.chipActive]}>
-                  <Text style={{color: selectedGroup===g.id?'white':'#64748B', fontWeight: 'bold'}}>{g.name}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-
             {addType === 'debt' && (
               <>
-                <Text style={{marginBottom: 5, fontSize: 12, color: '#F43F5E', fontWeight: 'bold'}}>誰欠你錢？</Text>
+                <Text style={{marginBottom: 5, fontSize: 12, color: '#F43F5E', fontWeight: 'bold'}}>誰欠你錢？ (只能選好友)</Text>
+                {friends.length === 0 ? <Text style={{color:'#94A3B8', padding:10}}>請先去首頁加好友！</Text> : 
                 <ScrollView horizontal style={{marginBottom: 20}} showsHorizontalScrollIndicator={false}>
-                  {members.map(m => (
-                    <TouchableOpacity key={m.user_id} onPress={()=>setSelectedMember(m.user_id)} style={[styles.chip, selectedMember===m.user_id && {backgroundColor: '#F43F5E'}]}>
-                      <Text style={{color: selectedMember===m.user_id?'white':'#64748B', fontWeight: 'bold'}}>{m.username}</Text>
+                  {friends.map(u => (
+                    <TouchableOpacity key={u.id} onPress={()=>setSelectedDebtor(u.id)} style={[styles.chip, selectedDebtor===u.id && {backgroundColor: '#F43F5E'}]}>
+                      <Text style={{color: selectedDebtor===u.id?'white':'#64748B', fontWeight: 'bold'}}>{u.username}</Text>
                     </TouchableOpacity>
                   ))}
-                </ScrollView>
+                </ScrollView>}
               </>
             )}
 
@@ -372,10 +318,34 @@ export default function HomeScreen({ session }) {
           </View>
         </View>
       </Modal>
+
+      {/* 加好友 Modal */}
+      <Modal visible={addFriendModal} animationType="fade" transparent={true}>
+         <View style={[styles.modalOverlay, {justifyContent: 'center', padding: 20}]}>
+            <View style={[styles.modalContent, {borderRadius: 24, minHeight: 'auto'}]}>
+                <Text style={{fontSize: 18, fontWeight: 'bold', marginBottom: 16, textAlign: 'center'}}>輸入好友代碼</Text>
+                <TextInput 
+                   style={[styles.input, {textAlign: 'center', letterSpacing: 2}]} 
+                   placeholder="例如: A1B2C3" 
+                   value={friendCode} 
+                   onChangeText={t => setFriendCode(t.toUpperCase())}
+                   maxLength={6}
+                />
+                <TouchableOpacity style={styles.btnPrimary} onPress={handleAddFriend}>
+                    <Text style={{color: 'white', fontWeight: 'bold'}}>確認加入</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={()=>setAddFriendModal(false)} style={{marginTop: 16, alignItems: 'center'}}>
+                    <Text style={{color: '#94A3B8'}}>取消</Text>
+                </TouchableOpacity>
+            </View>
+         </View>
+      </Modal>
+
     </SafeAreaView>
   );
 }
 
+// ... 樣式組件保持不變 ...
 const NavBtn = ({icon: Icon, label, active, onPress}) => (
   <TouchableOpacity onPress={onPress} style={{alignItems: 'center', width: 50}}>
     <Icon color={active ? COLORS.primary : '#CBD5E1'} size={24} />
@@ -395,8 +365,8 @@ const styles = StyleSheet.create({
   welcomeCard: { backgroundColor: COLORS.primary, borderRadius: 32, padding: 24, shadowColor: COLORS.primary, shadowOpacity: 0.3, shadowRadius: 20 },
   welcomeLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 10, fontWeight: '900', letterSpacing: 1, marginBottom: 4 },
   welcomeTitle: { color: 'white', fontSize: 28, fontWeight: '900' },
-  welcomeSub: { color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: '500', marginBottom: 20 },
-  statRow: { flexDirection: 'row', gap: 12 },
+  welcomeSub: { color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: '500' },
+  statRow: { flexDirection: 'row', gap: 12, marginTop: 20 },
   statBox: { flex: 1, backgroundColor: 'rgba(0,0,0,0.1)', padding: 12, borderRadius: 16 },
   statLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 10, fontWeight: 'bold' },
   statValue: { color: 'white', fontSize: 18, fontWeight: '900', marginTop: 4 },
@@ -412,10 +382,6 @@ const styles = StyleSheet.create({
   modalContent: { backgroundColor: 'white', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, minHeight: 500 },
   input: { backgroundColor: '#F1F5F9', padding: 16, borderRadius: 16, marginBottom: 12, fontSize: 16, fontWeight: 'bold' },
   chip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: '#F1F5F9', marginRight: 8 },
-  chipActive: { backgroundColor: COLORS.primary },
   btnPrimary: { backgroundColor: COLORS.primary, padding: 18, borderRadius: 20, alignItems: 'center', marginTop: 10 },
-  sectionBox: { backgroundColor: 'white', padding: 20, borderRadius: 30, marginBottom: 20 },
-  sectionTitle: { fontSize: 18, fontWeight: '900', color: '#1E293B', marginBottom: 10 },
-  groupCard: { backgroundColor: 'white', padding: 16, borderRadius: 16, marginBottom: 10 },
-  groupName: { fontWeight: 'bold', fontSize: 16, color: '#334155' }
+  sectionTitle: { fontSize: 18, fontWeight: '900', color: '#1E293B' }
 });
